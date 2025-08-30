@@ -164,3 +164,55 @@ void read_requesthdrs(rio_t *rp)
   }
   return;
 }
+
+/*
+ * parse_uri - HTTP URI를 파싱하여 filename과 CGI 인자 문자열을 채움
+ * uri: 파싱할 전체 URI 문자열 (e.g. "/godzilla.jpg" 또는 "/cgi-bin/adder?1&2")
+ * filename: 분석 결과 채워질 파일 경로 (e.g. "./godzilla.jpg")
+ * cgiargs: 분석 결과 채워질 CGI 인자 (e.g. "1&2")
+ * 리턴 값: 요청이 정적 콘텐츠이면 1, 동적 콘텐츠이면 0
+ * (strncpy, snprintf 등 안전한 함수 사용)
+ */
+int parse_uri(char *uri, char *filename, char *cgiargs)
+{
+  // strncmp를 사용해 uri가 정확히 "/cgi-bin/"으로 '시작'하는지 검사
+  // strstr보다 더 엄격하고 안전한 방법. 9는 "/cgi-bin/"의 길이
+  int is_cgi = (strncmp(uri, "/cgi-bin/", 9) == 0);
+
+  // cgiargs를 미리 빈 문자열로 초기화
+  cgiargs[0] = '\0';
+    
+  if (!is_cgi) { // 정적 콘텐츠 처리
+    // uri가 아예 비어있는 경우, 기본 경로 "/"로 처리
+    if (uri[0] == '\0') uri = "/";
+
+    // snprintf를 사용해 버퍼 오버플로우를 방지하며 filename 생성
+    // strcpy와 strcat을 합친 효과 (e.g. "./" + "/index.html")
+    snprintf(filename, MAXLINE, ".%s", uri);
+
+    // uri가 디렉터리 경로('/')로 끝나는 경우
+    size_t len = strlen(filename);
+    if (len > 0 && filename[len-1] == '/') {
+      // strlcat을 사용해 안전하게 "home.html"을 이어붙임
+      // strlcat은 BSD 계열 함수로, 버퍼 크기를 인자로 받아 오버플로우를 막음
+      strlcat(filename, "home.html", MAXLINE);
+    }
+
+    return 1; // 정적 콘텐츠이므로 1을 리턴.
+  }
+  else { // 동적 콘텐츠 처리
+
+    // strchr 함수로 '?' 문자가 uri 어디에 있는지 찾음 ('?'는 CGI 인자의 시작을 의미)
+    char *q = strchr(uri, '?');
+
+    if (q) {  // '?'가 있다면 (CGI 인자가 있다면)
+      snprintf(cgiargs, MAXLINE, "%s", q + 1); // snprintf로 안전하게 cgiargs를 복사.
+      *q = '\0'; // '?' 위치를 NULL 문자로 바꿔서 uri 문자열을 경로 부분에서 잘라냄.
+    }
+
+    // 마찬가지로 "." 뒤에 프로그램 경로를 이어붙여 filename을 만들어 줌
+    snprintf(filename, MAXLINE, ".%s", uri);
+    
+    return 0; // 동적 콘텐츠이므로 0을 리턴.
+  }
+}
