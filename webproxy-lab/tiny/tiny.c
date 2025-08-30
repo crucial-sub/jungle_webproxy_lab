@@ -142,3 +142,25 @@ void clienterror(int fd, char *cause, char *errnum,
   // 응답 본문 전송
   Rio_writen(fd, body, strlen(body));
 }
+
+/*
+ * read_requesthdrs - HTTP 요청의 나머지 헤더들을 읽고 무시하는 함수
+ * rp: 읽어올 rio_t 버퍼 포인터
+ * 이 함수는 요청 라인(첫 줄)은 이미 읽혔다고 가정하고,
+ * 그 다음 헤더 라인부터 헤더의 끝을 알리는 빈 줄("\r\n")이 나올 때까지
+ * 모든 라인을 읽어서 없애는 역할을 한다.
+ */
+void read_requesthdrs(rio_t *rp)
+{
+  char buf[MAXLINE];
+
+  // 한 줄을 읽는 것과 동시에, 읽은 내용이 있는지(EOF가 아닌지) 검사
+  while (Rio_readlineb(rp, buf, MAXLINE) > 0) {
+    // 읽은 내용이 빈 줄("\r\n")인지 검사
+    if (!strcmp(buf, "\r\n")) {
+      break;
+    }
+    printf("%s", buf); // 빈 줄이 아니면 헤더 내용 출력
+  }
+  return;
+}
