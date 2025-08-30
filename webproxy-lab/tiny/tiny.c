@@ -101,3 +101,44 @@ void doit(int fd)
     serve_dynamic(fd, filename, cgiargs);
   }
 }
+
+/*
+ * clienterror - 클라이언트에게 HTTP 에러 메시지를 전송 (안전한 snprintf 사용)
+ * cause: 에러 원인 (보통 파일 이름)
+ * errnum: HTTP 상태 코드 번호 (e.g. "404")
+ * shortmsg: 상태 코드에 대한 짧은 메시지 (e.g. "Not Found")
+ * longmsg: 브라우저에 표시될 긴 설명 메시지
+ */
+void clienterror(int fd, char *cause, char *errnum, 
+                 char *shortmsg, char *longmsg)
+{
+  char buf[MAXLINE], body[MAXBUF];
+
+  /* 1. HTTP 응답 본문(body)을 snprintf로 안전하게 만들기 */
+  // 책에 나온 여러 번의 sprintf 호출을 하나의 안전한 snprintf 호출로 합침
+  // MAXBUF 크기를 넘지 않도록 안전하게 문자열을 생성
+  snprintf(body, MAXBUF, "<html><title>Tiny Error</title>"
+                         "<body bgcolor=""#ffffff"">\r\n"
+                         "%s: %s\r\n"
+                         "<p>%s: %s\r\n"
+                         "<hr><em>The Tiny Web server</em>\r\n",
+                         errnum, shortmsg, longmsg, cause);
+
+  /* 2. HTTP 응답 헤더도 snprintf로 안전하게 전송하기 */
+  // 각 헤더 라인을 만들 때 버퍼 크기(MAXLINE)를 명시하여 오버플로우를 방지
+  
+  // 응답 라인
+  snprintf(buf, MAXLINE, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
+  Rio_writen(fd, buf, strlen(buf));
+  
+  // Content-type 헤더
+  snprintf(buf, MAXLINE, "Content-type: text/html\r\n");
+  Rio_writen(fd, buf, strlen(buf));
+
+  // Content-length 헤더와 빈 줄
+  snprintf(buf, MAXLINE, "Content-length: %d\r\n\r\n", (int)strlen(body));
+  Rio_writen(fd, buf, strlen(buf));
+  
+  // 응답 본문 전송
+  Rio_writen(fd, body, strlen(body));
+}
