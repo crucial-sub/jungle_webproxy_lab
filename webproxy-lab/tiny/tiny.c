@@ -18,85 +18,94 @@ void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
 
-  if (argc != 2)
-  {
+  if (argc != 2) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
 
   listenfd = Open_listenfd(argv[1]);
-  while (1)
-  {
+  while (1) {
     clientlen = sizeof(clientaddr);
     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
+    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE,
+                0);
     printf("Accepted connection from (%s, %s)\n", hostname, port);
     doit(connfd);
     Close(connfd);
   }
 }
 
-void doit(int fd)
-{
-  int is_static;    // 요청이 정적 콘텐츠인지 동적 콘텐츠인지 구별하기 위한 플래그
+void doit(int fd) {
+  int is_static; // 요청이 정적 콘텐츠인지 동적 콘텐츠인지 구별하기 위한 플래그
   struct stat sbuf; // 파일의 정보를 담기 위한 구조체 (크기, 권한 등)
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char filename[MAXLINE], cgiargs[MAXLINE];
   rio_t rio;
-   
+
   /* 요청 line과 헤더 읽기 */
   Rio_readinitb(&rio, fd);
-  // rio 버퍼를 통해 요청 라인 한 줄 (e.g. "GET /cgi-bin/adder?1&2 HTTP/1.0")을 읽어옴
+  // rio 버퍼를 통해 요청 라인 한 줄 (e.g. "GET /cgi-bin/adder?1&2 HTTP/1.0")을
+  // 읽어옴
   Rio_readlineb(&rio, buf, MAXLINE);
   printf("Request headers:\n");
   printf("%s", buf);
-  // 읽어온 요청 라인을 공백 기준으로 쪼개서 method(GET), uri(/cgi-bin/adder?1&2), version(HTTP/1.0) 변수에 각각 저장
+  // 읽어온 요청 라인을 공백 기준으로 쪼개서 method(GET),
+  // uri(/cgi-bin/adder?1&2), version(HTTP/1.0) 변수에 각각 저장
   sscanf(buf, "%s %s %s", method, uri, version);
 
   // tiny는 GET 메서드만 지원하므로, 다른 메서드(POST 등)가 오면 에러 처리
-  if (strcasecmp(method, "GET")) { // strcasecmp는 대소문자 구분 없이 비교. 같으면 0을 반환
-    clienterror(fd, method, "501", "NOT implemented", "Tiny does not implement this method");
+  if (strcasecmp(
+          method,
+          "GET")) { // strcasecmp는 대소문자 구분 없이 비교. 같으면 0을 반환
+    clienterror(fd, method, "501", "NOT implemented",
+                "Tiny does not implement this method");
     return;
   }
-  // 요청 라인 다음에 오는 나머지 요청 헤더들(User-Agent 등)을 읽고 무시함(빈 줄이 나올 때까지 while 문으로 다 읽어냄)
+  // 요청 라인 다음에 오는 나머지 요청 헤더들(User-Agent 등)을 읽고 무시함(빈
+  // 줄이 나올 때까지 while 문으로 다 읽어냄)
   read_requesthdrs(&rio);
 
   /* 2. URI를 파싱하여 파일 이름과 CGI 인자 추출 */
   // uri를 분석해서 정적(static) 콘텐츠인지 동적(dynamic) 콘텐츠인지 판단
   // uri에 cgi-bin이라는 문자열이 포함되어 있으면 동적 콘텐츠로 판단
   // 정적 콘텐츠일 경우: filename에 파일 경로(e.g. ./home.html)를 저장
-  // 동적 콘텐츠일 경우: filename에 CGI 프로그램 경로(예: ./cgi-bin/adder)를, cgiargs에는 CGI 프로그램에 넘겨줄 인자(예: 1&2)를 저장
+  // 동적 콘텐츠일 경우: filename에 CGI 프로그램 경로(예: ./cgi-bin/adder)를,
+  // cgiargs에는 CGI 프로그램에 넘겨줄 인자(예: 1&2)를 저장
   is_static = parse_uri(uri, filename, cgiargs);
 
   // 파일이 존재하지 않거나 접근할 수 없으면 에러를 발생시키고 종료
   if (stat(filename, &sbuf) < 0) {
-    clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file");
+    clienterror(fd, filename, "404", "Not found",
+                "Tiny couldn't find this file");
     return;
   }
-  
+
   /* 3. 콘텐츠 종류에 따라 정적/동적 서버에 처리 위임 */
   // S_IRUSR: Stat Is Readable by USeR (파일 소유자가 읽을 수 있는 권한)
   // S_IXUSR: Stat Is eXecutable by USeR (파일 소유자가 실행할 수 있는 권한)
-  // sbuf.st_mode: 파일의 종류와 권한 정보가 비트 마스크 형태로 한꺼번에 저장되어 있음
+  // sbuf.st_mode: 파일의 종류와 권한 정보가 비트 마스크 형태로 한꺼번에
+  // 저장되어 있음
   if (is_static) { /* 정적 콘텐츠(Static content) 제공 */
-    // 파일이 일반 파일(regular file)이 아니거나, 읽기 권한(S_IRUSR)이 없는 경우 '403 Forbidden' 에러 처리
+    // 파일이 일반 파일(regular file)이 아니거나, 읽기 권한(S_IRUSR)이 없는 경우
+    // '403 Forbidden' 에러 처리
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
-      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
+      clienterror(fd, filename, "403", "Forbidden",
+                  "Tiny couldn't read the file");
       return;
     }
     serve_static(fd, filename, sbuf.st_size);
-  }
-  else { /* 동적 콘텐츠(Dynamic content) 제공 */
-    // 파일이 일반 파일이 아니거나, 실행 권한(S_IXUSR)이 없는 경우 '403 Forbidden' 에러 처리
+  } else { /* 동적 콘텐츠(Dynamic content) 제공 */
+    // 파일이 일반 파일이 아니거나, 실행 권한(S_IXUSR)이 없는 경우 '403
+    // Forbidden' 에러 처리
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
-      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn’t run the CGI program");
+      clienterror(fd, filename, "403", "Forbidden",
+                  "Tiny couldn’t run the CGI program");
       return;
     }
     serve_dynamic(fd, filename, cgiargs);
@@ -110,28 +119,28 @@ void doit(int fd)
  * shortmsg: 상태 코드에 대한 짧은 메시지 (e.g. "Not Found")
  * longmsg: 브라우저에 표시될 긴 설명 메시지
  */
-void clienterror(int fd, char *cause, char *errnum, 
-                 char *shortmsg, char *longmsg)
-{
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
+                 char *longmsg) {
   char buf[MAXLINE], body[MAXBUF];
 
   /* 1. HTTP 응답 본문(body)을 snprintf로 안전하게 만들기 */
   // 책에 나온 여러 번의 sprintf 호출을 하나의 안전한 snprintf 호출로 합침
   // MAXBUF 크기를 넘지 않도록 안전하게 문자열을 생성
-  snprintf(body, MAXBUF, "<html><title>Tiny Error</title>"
-                         "<body bgcolor=""#ffffff"">\r\n"
-                         "%s: %s\r\n"
-                         "<p>%s: %s\r\n"
-                         "<hr><em>The Tiny Web server</em>\r\n",
-                         errnum, shortmsg, longmsg, cause);
+  int n = snprintf(body, sizeof(body),
+                   "<html><title>Tiny Error</title>"
+                   "<body bgcolor=\"#ffffff\">\r\n"
+                   "%s: %s\r\n"
+                   "<p>%s: %s\r\n"
+                   "<hr><em>The Tiny Web server</em>\r\n",
+                   "</body></html>\r\n", errnum, shortmsg, longmsg, cause);
 
   /* 2. HTTP 응답 헤더도 snprintf로 안전하게 전송하기 */
   // 각 헤더 라인을 만들 때 버퍼 크기(MAXLINE)를 명시하여 오버플로우를 방지
-  
+
   // 응답 라인
   snprintf(buf, MAXLINE, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
   Rio_writen(fd, buf, strlen(buf));
-  
+
   // Content-type 헤더
   snprintf(buf, MAXLINE, "Content-type: text/html\r\n");
   Rio_writen(fd, buf, strlen(buf));
@@ -139,7 +148,7 @@ void clienterror(int fd, char *cause, char *errnum,
   // Content-length 헤더와 빈 줄
   snprintf(buf, MAXLINE, "Content-length: %d\r\n\r\n", (int)strlen(body));
   Rio_writen(fd, buf, strlen(buf));
-  
+
   // 응답 본문 전송
   Rio_writen(fd, body, strlen(body));
 }
@@ -151,8 +160,7 @@ void clienterror(int fd, char *cause, char *errnum,
  * 그 다음 헤더 라인부터 헤더의 끝을 알리는 빈 줄("\r\n")이 나올 때까지
  * 모든 라인을 읽어서 없애는 역할을 한다.
  */
-void read_requesthdrs(rio_t *rp)
-{
+void read_requesthdrs(rio_t *rp) {
   char buf[MAXLINE];
 
   // 한 줄을 읽는 것과 동시에, 읽은 내용이 있는지(EOF가 아닌지) 검사
@@ -172,56 +180,57 @@ void read_requesthdrs(rio_t *rp)
  * filename: 분석 결과 채워질 파일 경로 (e.g. "./godzilla.jpg")
  * cgiargs: 분석 결과 채워질 CGI 인자 (e.g. "1&2")
  * 리턴 값: 요청이 정적 콘텐츠이면 1, 동적 콘텐츠이면 0
- * (strncpy, snprintf 등 안전한 함수 사용)
+ * (버퍼 오버플로우 위험이 큰 strcpy나 strcat 대신 안전한 snprintf 사용)
  */
-int parse_uri(char *uri, char *filename, char *cgiargs)
-{
+int parse_uri(char *uri, char *filename, char *cgiargs) {
   // strncmp를 사용해 uri가 정확히 "/cgi-bin/"으로 '시작'하는지 검사
   // strstr보다 더 엄격하고 안전한 방법. 9는 "/cgi-bin/"의 길이
   int is_cgi = (strncmp(uri, "/cgi-bin/", 9) == 0);
 
   // cgiargs를 미리 빈 문자열로 초기화
   cgiargs[0] = '\0';
-    
-  if (!is_cgi) { // 정적 콘텐츠 처리
-    // uri가 아예 비어있는 경우, 기본 경로 "/"로 처리
-    if (uri[0] == '\0') uri = "/";
 
-    // snprintf를 사용해 버퍼 오버플로우를 방지하며 filename 생성
-    // strcpy와 strcat을 합친 효과 (e.g. "." + "/index.html")
+  if (!is_cgi) { // 정적 콘텐츠 처리
+    // 빈 URI 방어
+    if (!uri[0])
+      uri = "/";
+
+    /* filename = "." + uri (버퍼 초과 방지) */
     snprintf(filename, MAXLINE, ".%s", uri);
 
-    // uri가 디렉터리 경로('/')로 끝나는 경우
+    // uri가 디렉터리 경로('/')로 끝나는 경우 기본 문서 붙이기
     size_t len = strlen(filename);
-    if (len > 0 && filename[len-1] == '/') {
-      // strlcat을 사용해 안전하게 "home.html"을 이어붙임
-      // strlcat은 BSD 계열 함수로, 버퍼 크기를 인자로 받아 오버플로우를 막음
-      strlcat(filename, "home.html", MAXLINE);
+    if (len && filename[len - 1] == '/') {
+      // snprintf를 사용해 filename의 끝에 "home.html"을 안전하게 이어붙임
+      snprintf(filename + len, // 쓸 위치: 기존 문자열의 끝(NULL 문자 위치)
+               MAXLINE - len, // 남은 버퍼 공간 크기
+               "home.html");  // 쓸 내용
     }
 
     return 1; // 정적 콘텐츠이므로 1을 리턴.
-  }
-  else { // 동적 콘텐츠 처리
+  } else {    // 동적 콘텐츠 처리
 
-    // strchr 함수로 '?' 문자가 uri 어디에 있는지 찾음 ('?'는 CGI 인자의 시작을 의미)
+    // strchr 함수로 '?' 문자가 uri 어디에 있는지 찾음 ('?'는 CGI 인자의 시작을
+    // 의미)
     char *q = strchr(uri, '?');
 
-    if (q) {  // '?'가 있다면 (CGI 인자가 있다면)
-      snprintf(cgiargs, MAXLINE, "%s", q + 1); // snprintf로 안전하게 cgiargs를 복사.
-      *q = '\0'; // '?' 위치를 NULL 문자로 바꿔서 uri 문자열을 경로 부분에서 잘라냄.
+    if (q) { // '?'가 있다면 (CGI 인자가 있다면)
+      snprintf(cgiargs, MAXLINE, "%s",
+               q + 1); // snprintf로 안전하게 cgiargs를 복사.
+      *q = '\0'; // '?' 위치를 NULL 문자로 바꿔서 uri 문자열을 경로 부분에서
+                 // 잘라냄.
     }
 
     // 마찬가지로 "." 뒤에 프로그램 경로를 이어붙여 filename을 만들어 줌
     snprintf(filename, MAXLINE, ".%s", uri);
-    
+
     return 0; // 동적 콘텐츠이므로 0을 리턴.
   }
 }
 
 // serve_static - 정적 파일을 클라이언트에게 전송
-void serve_static(int fd, char *filename, size_t filesize)
-{
-  int srcfd; // 요청된 파일을 가리킬 파일 디스크립터
+void serve_static(int fd, char *filename, size_t filesize) {
+  int srcfd;  // 요청된 파일을 가리킬 파일 디스크립터
   char *srcp; // 요청된 파일을 메모리에 매핑한 시작 주소를 가리킬 포인터
   char filetype[MAXLINE], buf[MAXBUF];
 
@@ -231,17 +240,19 @@ void serve_static(int fd, char *filename, size_t filesize)
   get_filetype(filename, filetype);
 
   // 응답 헤더 문자열 생성 (snprintf 사용으로 buf 오버플로우 방지)
-  snprintf(buf, sizeof(buf), "HTTP/1.0 200 OK\r\n"
-                         "Server: Tiny Web Server\r\n"
-                         "Connection: close\r\n"
-                         "Content-length: %d\r\n"
-                         "Content-type: %s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
-                         ,filesize, filetype);
+  snprintf(buf, sizeof(buf),
+           "HTTP/1.0 200 OK\r\n"
+           "Server: Tiny Web Server\r\n"
+           "Connection: close\r\n"
+           "Content-length: %d\r\n"
+           "Content-type: %s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
+           ,
+           filesize, filetype);
   Rio_writen(fd, buf, strlen(buf)); // 생성된 응답 헤더를 클라이언트에게 전송
   printf("Response headers:\n%s", buf);
 
   /* 2. HTTP 응답 본문(Response body)을 클라이언트에게 전송 */
-  srcfd = Open(filename, O_RDONLY, 0); //요청된 파일을 읽기 전용으로 열기
+  srcfd = Open(filename, O_RDONLY, 0); // 요청된 파일을 읽기 전용으로 열기
 
   // 파일을 메모리에 매핑(mmap). 이제 srcp 포인터로 파일 내용에 직접 접근 가능
   // 이 방식은 파일을 버퍼로 읽어오는 것보다 훨씬 효율적
@@ -256,12 +267,11 @@ void serve_static(int fd, char *filename, size_t filesize)
 }
 
 /*
- * get_filetype - 파일 이름으로부터 HTTP Content-type을 결정 (안전하고 개선된 버전)
- * filename: 분석할 파일 경로 (const char*로 받아 원본을 수정하지 않겠다는 약속)
- * filetype: 결정된 Content-type 문자열이 저장될 버퍼
+ * get_filetype - 파일 이름으로부터 HTTP Content-type을 결정 (안전하고 개선된
+ * 버전) filename: 분석할 파일 경로 (const char*로 받아 원본을 수정하지 않겠다는
+ * 약속) filetype: 결정된 Content-type 문자열이 저장될 버퍼
  */
-void get_filetype(const char *filename, char *filetype)
-{
+void get_filetype(const char *filename, char *filetype) {
   // strrchr: 문자열의 '오른쪽 끝에서부터' '.' 문자를 검색하여 포인터를 반환
   // => 파일 확장자를 찾는 가장 정확한 방법
   const char *ext = strrchr(filename, '.');
@@ -290,6 +300,7 @@ void get_filetype(const char *filename, char *filetype)
   else if (!strcasecmp(ext, "png"))
     snprintf(filetype, MAXLINE, "image/png");
   else // 위 목록에 없는 모든 다른 확장자들의 경우
-       // 일반적인 바이너리 파일 타입을 의미하는 "application/octet-stream"으로 설정
+       // 일반적인 바이너리 파일 타입을 의미하는 "application/octet-stream"으로
+       // 설정
     snprintf(filetype, MAXLINE, "application/octet-stream");
 }
