@@ -7,6 +7,7 @@
  *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
  */
 #include "csapp.h"
+#include <strings.h>
 
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
@@ -187,7 +188,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
     if (uri[0] == '\0') uri = "/";
 
     // snprintf를 사용해 버퍼 오버플로우를 방지하며 filename 생성
-    // strcpy와 strcat을 합친 효과 (e.g. "./" + "/index.html")
+    // strcpy와 strcat을 합친 효과 (e.g. "." + "/index.html")
     snprintf(filename, MAXLINE, ".%s", uri);
 
     // uri가 디렉터리 경로('/')로 끝나는 경우
@@ -215,4 +216,80 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
     
     return 0; // 동적 콘텐츠이므로 0을 리턴.
   }
+}
+
+// serve_static - 정적 파일을 클라이언트에게 전송
+void serve_static(int fd, char *filename, size_t filesize)
+{
+  int srcfd; // 요청된 파일을 가리킬 파일 디스크립터
+  char *srcp; // 요청된 파일을 메모리에 매핑한 시작 주소를 가리킬 포인터
+  char filetype[MAXLINE], buf[MAXBUF];
+
+  /* 1. HTTP 응답 헤더(Response headers)를 클라이언트에게 전송 */
+
+  // 파일 이름의 접미사를 보고 파일 타입을 결정 (예: .html -> text/html)
+  get_filetype(filename, filetype);
+
+  // 응답 헤더 문자열 생성 (snprintf 사용으로 buf 오버플로우 방지)
+  snprintf(buf, sizeof(buf), "HTTP/1.0 200 OK\r\n"
+                         "Server: Tiny Web Server\r\n"
+                         "Connection: close\r\n"
+                         "Content-length: %d\r\n"
+                         "Content-type: %s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
+                         ,filesize, filetype);
+  Rio_writen(fd, buf, strlen(buf)); // 생성된 응답 헤더를 클라이언트에게 전송
+  printf("Response headers:\n%s", buf);
+
+  /* 2. HTTP 응답 본문(Response body)을 클라이언트에게 전송 */
+  srcfd = Open(filename, O_RDONLY, 0); //요청된 파일을 읽기 전용으로 열기
+
+  // 파일을 메모리에 매핑(mmap). 이제 srcp 포인터로 파일 내용에 직접 접근 가능
+  // 이 방식은 파일을 버퍼로 읽어오는 것보다 훨씬 효율적
+  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+
+  // 파일을 메모리에 매핑했으므로, 파일 디스크립터는 더 이상 필요 없으니 닫아줌
+  Close(srcfd);
+  // 파일 내용이 담긴, 매핑된 메모리 영역을 통째로 클라이언트에게 전송
+  Rio_writen(fd, srcp, filesize);
+  // 매핑 해제(리소스 정리)
+  Munmap(srcp, filesize);
+}
+
+/*
+ * get_filetype - 파일 이름으로부터 HTTP Content-type을 결정 (안전하고 개선된 버전)
+ * filename: 분석할 파일 경로 (const char*로 받아 원본을 수정하지 않겠다는 약속)
+ * filetype: 결정된 Content-type 문자열이 저장될 버퍼
+ */
+void get_filetype(const char *filename, char *filetype)
+{
+  // strrchr: 문자열의 '오른쪽 끝에서부터' '.' 문자를 검색하여 포인터를 반환
+  // => 파일 확장자를 찾는 가장 정확한 방법
+  const char *ext = strrchr(filename, '.');
+
+  // ext가 NULL이면 '.' 문자가 없는 경우 (확장자가 없는 경우)
+  if (!ext) {
+    // 기본값으로 일반 텍스트(UTF-8) 타입을 설정하고 함수 종료.
+    snprintf(filetype, MAXLINE, "text/plain; charset=utf-8");
+    return;
+  }
+  // 포인터를 1 증가시켜 '.' 바로 다음 문자를 가리키게 함 (실제 확장자의 시작)
+  ext++;
+
+  // strcasecmp: 대소문자를 구분하지 않고 문자열을 비교해서 같으면 0 반환
+  // e.g. "HTML"과 "html"을 같게 취급
+  if (!strcasecmp(ext, "html") || !strcasecmp(ext, "htm"))
+    snprintf(filetype, MAXLINE, "text/html; charset=utf-8");
+  else if (!strcasecmp(ext, "css"))
+    snprintf(filetype, MAXLINE, "text/css; charset=utf-8");
+  else if (!strcasecmp(ext, "js"))
+    snprintf(filetype, MAXLINE, "application/javascript");
+  else if (!strcasecmp(ext, "gif"))
+    snprintf(filetype, MAXLINE, "image/gif");
+  else if (!strcasecmp(ext, "jpg") || !strcasecmp(ext, "jpeg"))
+    snprintf(filetype, MAXLINE, "image/jpeg");
+  else if (!strcasecmp(ext, "png"))
+    snprintf(filetype, MAXLINE, "image/png");
+  else // 위 목록에 없는 모든 다른 확장자들의 경우
+       // 일반적인 바이너리 파일 타입을 의미하는 "application/octet-stream"으로 설정
+    snprintf(filetype, MAXLINE, "application/octet-stream");
 }
