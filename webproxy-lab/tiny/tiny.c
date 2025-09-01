@@ -9,14 +9,17 @@
 #include "csapp.h"
 #include <strings.h>
 
+#define FILETYPE_MAX 256
+
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
 void serve_static(int fd, char *filename, size_t filesize);
-void get_filetype(const char *filename, char *filetype);
+void get_filetype(const char *filename, char *filetype, size_t cap);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
+char filetype[FILETYPE_MAX];
 
 int main(int argc, char **argv) {
   int listenfd, connfd;
@@ -130,23 +133,24 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
            "<html><title>Tiny Error</title>"
            "<body bgcolor=\"#ffffff\">\r\n"
            "%s: %s\r\n"
-           "<p>%s: %s\r\n"
-           "<hr><em>The Tiny Web server</em>\r\n",
-           "</body></html>\r\n", errnum, shortmsg, longmsg, cause);
+           "<p>%s: %s</p>\r\n"
+           "<hr><em>The Tiny Web server</em>\r\n"
+           "</body></html>\r\n",
+           errnum, shortmsg, longmsg, cause);
 
   /* 2. HTTP 응답 헤더도 snprintf로 안전하게 전송하기 */
   // 각 헤더 라인을 만들 때 버퍼 크기(MAXLINE)를 명시하여 오버플로우를 방지
 
   // 응답 라인
-  snprintf(buf, MAXLINE, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
+  snprintf(buf, sizeof(buf), "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
   Rio_writen(fd, buf, strlen(buf));
 
   // Content-type 헤더
-  snprintf(buf, MAXLINE, "Content-type: text/html\r\n");
+  snprintf(buf, sizeof(buf), "Content-Type: text/html; charset=utf-8\r\n");
   Rio_writen(fd, buf, strlen(buf));
 
   // Content-length 헤더와 빈 줄
-  snprintf(buf, MAXLINE, "Content-length: %d\r\n\r\n", (int)strlen(body));
+  snprintf(buf, sizeof(buf), "Content-length: %zu\r\n\r\n", strlen(body));
   Rio_writen(fd, buf, strlen(buf));
 
   // 응답 본문 전송
@@ -232,12 +236,15 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 void serve_static(int fd, char *filename, size_t filesize) {
   int srcfd;  // 요청된 파일을 가리킬 파일 디스크립터
   char *srcp; // 요청된 파일을 메모리에 매핑한 시작 주소를 가리킬 포인터
-  char filetype[MAXLINE], buf[MAXBUF];
+  char buf[MAXBUF];
 
   /* 1. HTTP 응답 헤더(Response headers)를 클라이언트에게 전송 */
 
   // 파일 이름의 접미사를 보고 파일 타입을 결정 (예: .html -> text/html)
-  get_filetype(filename, filetype);
+  get_filetype(filename, filetype, sizeof(filetype));
+
+  // filetype은 위에서 cap만큼만 채워졌지만, 포맷 단계에서도 상한을 한 번 더!
+  int ft_prec = (int)strnlen(filetype, sizeof(filetype) - 1);
 
   // 응답 헤더 문자열 생성 (snprintf 사용으로 buf 오버플로우 방지)
   snprintf(buf, sizeof(buf),
@@ -245,9 +252,9 @@ void serve_static(int fd, char *filename, size_t filesize) {
            "Server: Tiny Web Server\r\n"
            "Connection: close\r\n"
            "Content-length: %zu\r\n"
-           "Content-type: %s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
+           "Content-type: %.*s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
            ,
-           filesize, filetype);
+           filesize, ft_prec, filetype);
   Rio_writen(fd, buf, strlen(buf)); // 생성된 응답 헤더를 클라이언트에게 전송
   printf("Response headers:\n%s", buf);
 
@@ -271,15 +278,19 @@ void serve_static(int fd, char *filename, size_t filesize) {
  * 버전) filename: 분석할 파일 경로 (const char*로 받아 원본을 수정하지 않겠다는
  * 약속) filetype: 결정된 Content-type 문자열이 저장될 버퍼
  */
-void get_filetype(const char *filename, char *filetype) {
+void get_filetype(const char *filename, char *filetype, size_t cap) {
+  if (cap == 0) // 쓸 공간이 전혀 없으면 그냥 종료
+    return;
+  filetype[0] = '\0'; // 최소한의 안전 초기화
+
   // strrchr: 문자열의 '오른쪽 끝에서부터' '.' 문자를 검색하여 포인터를 반환
   // => 파일 확장자를 찾는 가장 정확한 방법
   const char *ext = strrchr(filename, '.');
 
-  // ext가 NULL이면 '.' 문자가 없는 경우 (확장자가 없는 경우)
-  if (!ext) {
+  // 확장자가 없는 경우 or dotfile(e.g. .env)인 경우
+  if (!ext || ext == filename) {
     // 기본값으로 일반 텍스트(UTF-8) 타입을 설정하고 함수 종료.
-    snprintf(filetype, MAXLINE, "text/plain; charset=utf-8");
+    snprintf(filetype, cap, "text/plain; charset=utf-8");
     return;
   }
   // 포인터를 1 증가시켜 '.' 바로 다음 문자를 가리키게 함 (실제 확장자의 시작)
@@ -288,21 +299,21 @@ void get_filetype(const char *filename, char *filetype) {
   // strcasecmp: 대소문자를 구분하지 않고 문자열을 비교해서 같으면 0 반환
   // e.g. "HTML"과 "html"을 같게 취급
   if (!strcasecmp(ext, "html") || !strcasecmp(ext, "htm"))
-    snprintf(filetype, MAXLINE, "text/html; charset=utf-8");
+    snprintf(filetype, cap, "text/html; charset=utf-8");
   else if (!strcasecmp(ext, "css"))
-    snprintf(filetype, MAXLINE, "text/css; charset=utf-8");
+    snprintf(filetype, cap, "text/css; charset=utf-8");
   else if (!strcasecmp(ext, "js"))
-    snprintf(filetype, MAXLINE, "application/javascript");
+    snprintf(filetype, cap, "application/javascript");
   else if (!strcasecmp(ext, "gif"))
-    snprintf(filetype, MAXLINE, "image/gif");
+    snprintf(filetype, cap, "image/gif");
   else if (!strcasecmp(ext, "jpg") || !strcasecmp(ext, "jpeg"))
-    snprintf(filetype, MAXLINE, "image/jpeg");
+    snprintf(filetype, cap, "image/jpeg");
   else if (!strcasecmp(ext, "png"))
-    snprintf(filetype, MAXLINE, "image/png");
+    snprintf(filetype, cap, "image/png");
   else // 위 목록에 없는 모든 다른 확장자들의 경우
        // 일반적인 바이너리 파일 타입을 의미하는 "application/octet-stream"으로
        // 설정
-    snprintf(filetype, MAXLINE, "application/octet-stream");
+    snprintf(filetype, cap, "application/octet-stream");
 }
 
 /*
