@@ -14,6 +14,7 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *range);
 int parse_uri(char *uri, char *filename, char *cgiargs);
+/* 정적 파일 전송: 단일 Range 요청(206/416)과 전체 전송(200)을 모두 처리 */
 void serve_static(int fd, char *filename, size_t filesize, char *range);
 void get_filetype(const char *filename, char *filetype, size_t cap);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
@@ -44,8 +45,8 @@ int main(int argc, char **argv) {
 }
 
 void doit(int fd) {
-  int is_static; // 요청이 정적 콘텐츠인지 동적 콘텐츠인지 구별하기 위한 플래그
-  struct stat sbuf; // 파일의 정보를 담기 위한 구조체 (크기, 권한 등)
+  int is_static; // // 요청이 정적/동적 콘텐츠인지 구별하는 플래그
+  struct stat sbuf; // 파일 정보를 담기 위한 구조체 (크기, 권한 등)
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char filename[MAXLINE], cgiargs[MAXLINE];
   char range[MAXLINE] = ""; // Range 헤더 값을 저장할 변수 추가 및 초기화
@@ -60,11 +61,10 @@ void doit(int fd) {
 
   printf("Request headers:\n");
   printf("%s", buf);
-  // 읽어온 요청 라인을 공백 기준으로 쪼개서 method(GET),
-  // uri(/cgi-bin/adder?1&2), version(HTTP/1.0) 변수에 각각 저장
+  // 요청 라인 파싱하여 각각 변수에 담음: method / uri / version
   sscanf(buf, "%s %s %s", method, uri, version);
 
-  // tiny는 GET 메서드만 지원하므로, 다른 메서드(POST 등)가 오면 에러 처리
+  // Tiny는 GET만 지원(그 외 메서드는 501)
   if (strcasecmp(
           method,
           "GET")) { // strcasecmp는 대소문자 구분 없이 비교. 같으면 0을 반환
@@ -72,16 +72,12 @@ void doit(int fd) {
                 "Tiny does not implement this method");
     return;
   }
-  // 요청 라인 다음에 오는 나머지 요청 헤더들(User-Agent 등)을 읽고 무시함(빈
-  // 줄이 나올 때까지 while 문으로 다 읽어냄)
+
+  // 나머지 요청 헤더를 읽는다.
+  // 여기서 Range 헤더가 있으면 range 버퍼에 저장(그 외는 무시).
   read_requesthdrs(&rio, range);
 
-  /* 2. URI를 파싱하여 파일 이름과 CGI 인자 추출 */
-  // uri를 분석해서 정적(static) 콘텐츠인지 동적(dynamic) 콘텐츠인지 판단
-  // uri에 cgi-bin이라는 문자열이 포함되어 있으면 동적 콘텐츠로 판단
-  // 정적 콘텐츠일 경우: filename에 파일 경로(e.g. ./home.html)를 저장
-  // 동적 콘텐츠일 경우: filename에 CGI 프로그램 경로(예: ./cgi-bin/adder)를,
-  // cgiargs에는 CGI 프로그램에 넘겨줄 인자(예: 1&2)를 저장
+  /* 2. URI 파싱: 정적 vs 동적, 파일 경로/CGI 인자 추출 */
   is_static = parse_uri(uri, filename, cgiargs);
 
   // 파일이 존재하지 않거나 접근할 수 없으면 에러를 발생시키고 종료
@@ -98,16 +94,15 @@ void doit(int fd) {
   // 저장되어 있음
   if (is_static) { /* 정적 콘텐츠(Static content) 제공 */
     // 파일이 일반 파일(regular file)이 아니거나, 읽기 권한(S_IRUSR)이 없는 경우
-    // '403 Forbidden' 에러 처리
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
       clienterror(fd, filename, "403", "Forbidden",
                   "Tiny couldn't read the file");
       return;
     }
+    // 정적 파일 전송: Range(단일 범위)와 전체 전송 모두 지원
     serve_static(fd, filename, sbuf.st_size, range);
   } else { /* 동적 콘텐츠(Dynamic content) 제공 */
-    // 파일이 일반 파일이 아니거나, 실행 권한(S_IXUSR)이 없는 경우 '403
-    // Forbidden' 에러 처리
+    // 파일이 일반 파일이 아니거나, 실행 권한(S_IXUSR)이 없는 경우 '403 에러'
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
       clienterror(fd, filename, "403", "Forbidden",
                   "Tiny couldn’t run the CGI program");
@@ -128,9 +123,7 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg) {
   char buf[MAXLINE], body[MAXBUF];
 
-  /* 1. HTTP 응답 본문(body)을 snprintf로 안전하게 만들기 */
-  // 책에 나온 여러 번의 sprintf 호출을 하나의 안전한 snprintf 호출로 합침
-  // MAXBUF 크기를 넘지 않도록 안전하게 문자열을 생성
+  /* 1) HTML 본문 구성 */
   snprintf(body, sizeof(body),
            "<html><title>Tiny Error</title>"
            "<body bgcolor=\"#ffffff\">\r\n"
@@ -140,9 +133,7 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
            "</body></html>\r\n",
            errnum, shortmsg, longmsg, cause);
 
-  /* 2. HTTP 응답 헤더도 snprintf로 안전하게 전송하기 */
-  // 각 헤더 라인을 만들 때 버퍼 크기(MAXLINE)를 명시하여 오버플로우를 방지
-
+  /* 2) 헤더 전송 */
   // 응답 라인
   snprintf(buf, sizeof(buf), "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
   Rio_writen(fd, buf, strlen(buf));
@@ -160,11 +151,12 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
 }
 
 /*
- * read_requesthdrs - HTTP 요청의 나머지 헤더들을 읽고 무시하는 함수
- * rp: 읽어올 rio_t 버퍼 포인터
- * 'Range' 헤더가 있으면 그 값을 range_buf에 저장한다.
+ * read_requesthdrs - 나머지 요청 헤더를 읽는다.
+ * - 빈 줄("\r\n")이 나올 때까지 읽고, 로그에 출력
+ * - "Range:" 헤더가 있으면 range에 그대로 복사해둔다.
+ *   (예: "Range: bytes=0-1023\r\n")
  */
-void read_requesthdrs(rio_t *rp, char *range_buf) {
+void read_requesthdrs(rio_t *rp, char *range) {
   char buf[MAXLINE];
 
   while (Rio_readlineb(rp, buf, MAXLINE) > 0) {
@@ -173,20 +165,17 @@ void read_requesthdrs(rio_t *rp, char *range_buf) {
     printf("%s", buf); // 로그 출력
 
     if (strncasecmp(buf, "Range:", 6) == 0) {
-      // buf의 내용을 range_buf에 MAXLINE 크기 제한을 두고 안전하게 복사한다.
-      snprintf(range_buf, MAXLINE, "%s", buf);
+      // 전체 라인을 안전하게 저장(나중에 serve_static에서 파싱)
+      snprintf(range, MAXLINE, "%s", buf);
     }
   }
   return;
 }
 
 /*
- * parse_uri - HTTP URI를 파싱하여 filename과 CGI 인자 문자열을 채움
- * uri: 파싱할 전체 URI 문자열 (e.g. "/godzilla.jpg" 또는 "/cgi-bin/adder?1&2")
- * filename: 분석 결과 채워질 파일 경로 (e.g. "./godzilla.jpg")
- * cgiargs: 분석 결과 채워질 CGI 인자 (e.g. "1&2")
- * 리턴 값: 요청이 정적 콘텐츠이면 1, 동적 콘텐츠이면 0
- * (버퍼 오버플로우 위험이 큰 strcpy나 strcat 대신 안전한 snprintf 사용)
+ * parse_uri - URI를 파싱해 정적/동적을 구분하고, filename / cgiargs를 채운다.
+ * - 정적: filename = "." + uri, 디렉터리면 기본 문서("home.html") 추가
+ * - 동적: "?" 뒤를 cgiargs로 분리한 뒤, filename = "." + (경로 부분)
  */
 int parse_uri(char *uri, char *filename, char *cgiargs) {
   // strncmp를 사용해 uri가 정확히 "/cgi-bin/"으로 '시작'하는지 검사
@@ -201,7 +190,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
     if (!uri[0])
       uri = "/";
 
-    /* filename = "." + uri (버퍼 초과 방지) */
+    /* filename = "." + uri */
     snprintf(filename, MAXLINE, ".%s", uri);
 
     // uri가 디렉터리 경로('/')로 끝나는 경우 기본 문서 붙이기
@@ -236,8 +225,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 
 // serve_static - 정적 파일을 클라이언트에게 전송
 void serve_static(int fd, char *filename, size_t filesize, char *range) {
-  int srcfd;  // 요청된 파일을 가리킬 파일 디스크립터
-  char *srcp; // 요청된 파일을 메모리에 매핑한 시작 주소를 가리킬 포인터
+  int srcfd; // 요청된 파일을 가리킬 파일 디스크립터
   char buf[MAXBUF];
   char filetype[FILETYPE_MAX];
   long start = 0,
@@ -316,16 +304,44 @@ void serve_static(int fd, char *filename, size_t filesize, char *range) {
   /* 2. HTTP 응답 본문(Response body)을 클라이언트에게 전송 */
   srcfd = Open(filename, O_RDONLY, 0); // 요청된 파일을 읽기 전용으로 열기
 
-  // 파일을 메모리에 매핑(mmap). 이제 srcp 포인터로 파일 내용에 직접 접근 가능
-  // 이 방식은 파일을 버퍼로 읽어오는 것보다 훨씬 효율적
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  // 메모리 효율을 위해 청크 단위 복사
+  static const size_t CHUNK = 64 * 1024; // 64KB
+  // 큰 파일을 한 번에 malloc(filesize) 하지 않고,
+  // 고정 크기 블록으로 처리하니 메모리 사용이 일정하고,
+  // 소켓의 백프레셔(상대가 느리면 write가 막힘) 에도 유연하게 대응.
+  char *blk = Malloc(CHUNK ? CHUNK : 1);
 
-  // 파일을 메모리에 매핑했으므로, 파일 디스크립터는 더 이상 필요 없으니 닫아줌
+  // 파일 오프셋을 Range 시작점(start)으로 이동.
+  // Range가 없으면 start==0이라 파일 맨 처음으로 이동.
+  // off_t 캐스팅은 플랫폼별 타입 일치용.
+  Lseek(srcfd, (off_t)start, SEEK_SET);
+
+  // left: 아직 보내야 할 바이트 수(이미 tosend = end - start + 1로 계산해 둠).
+  size_t left = tosend;
+
+  // 아래의 루프 덕에 큰 파일도 적은 메모리로 안정적으로 스트리밍 가능.
+  // 네트워크 지연/혼잡으로 write가 분할되어도 문제 없이 이어서 전송.
+  // Range 요청이든 전체 전송이든 같은 루틴으로 처리 가능
+  // (시작 오프셋 / 길이만 다름).
+  while (left > 0) {
+    // want: 이번 회차에 읽고 싶은 최대 바이트 수(CHUNK 또는 남은 양).
+    size_t want = (left < CHUNK) ? left : CHUNK;
+
+    // 파일 디스크립터에서 정확히 want바이트를 읽기 위해 반복하는 robust read.
+    ssize_t nrd = Rio_readn(srcfd, blk, want);
+    if (nrd <= 0)
+      break; // EOF/에러 방어
+
+    // 소켓으로 바이트를 정확히 nrd만큼 다 보낼 때까지 반복하는 robust write.
+    Rio_writen(fd, blk, (size_t)nrd);
+
+    // 누적 전송량 갱신.left가 0이 되면 목표 길이 전송 완료.
+    left -= (size_t)nrd;
+  }
+
+  // 메모리 해제 + 파일 디스크립터 닫기로 리소스 정리.
+  Free(blk);
   Close(srcfd);
-  // 파일 내용이 담긴, 매핑된 메모리 영역을 통째로 클라이언트에게 전송
-  Rio_writen(fd, srcp, filesize);
-  // 매핑 해제(리소스 정리)
-  Munmap(srcp, filesize);
 }
 
 /*
