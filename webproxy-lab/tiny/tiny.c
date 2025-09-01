@@ -12,8 +12,8 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
-void get_filetype(char *filename, char *filetype);
+void serve_static(int fd, char *filename, size_t filesize);
+void get_filetype(const char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
@@ -126,13 +126,13 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
   /* 1. HTTP 응답 본문(body)을 snprintf로 안전하게 만들기 */
   // 책에 나온 여러 번의 sprintf 호출을 하나의 안전한 snprintf 호출로 합침
   // MAXBUF 크기를 넘지 않도록 안전하게 문자열을 생성
-  int n = snprintf(body, sizeof(body),
-                   "<html><title>Tiny Error</title>"
-                   "<body bgcolor=\"#ffffff\">\r\n"
-                   "%s: %s\r\n"
-                   "<p>%s: %s\r\n"
-                   "<hr><em>The Tiny Web server</em>\r\n",
-                   "</body></html>\r\n", errnum, shortmsg, longmsg, cause);
+  snprintf(body, sizeof(body),
+           "<html><title>Tiny Error</title>"
+           "<body bgcolor=\"#ffffff\">\r\n"
+           "%s: %s\r\n"
+           "<p>%s: %s\r\n"
+           "<hr><em>The Tiny Web server</em>\r\n",
+           "</body></html>\r\n", errnum, shortmsg, longmsg, cause);
 
   /* 2. HTTP 응답 헤더도 snprintf로 안전하게 전송하기 */
   // 각 헤더 라인을 만들 때 버퍼 크기(MAXLINE)를 명시하여 오버플로우를 방지
@@ -244,7 +244,7 @@ void serve_static(int fd, char *filename, size_t filesize) {
            "HTTP/1.0 200 OK\r\n"
            "Server: Tiny Web Server\r\n"
            "Connection: close\r\n"
-           "Content-length: %d\r\n"
+           "Content-length: %zu\r\n"
            "Content-type: %s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
            ,
            filesize, filetype);
@@ -303,4 +303,48 @@ void get_filetype(const char *filename, char *filetype) {
        // 일반적인 바이너리 파일 타입을 의미하는 "application/octet-stream"으로
        // 설정
     snprintf(filetype, MAXLINE, "application/octet-stream");
+}
+
+/*
+ * serve_dynamic - CGI 프로그램을 실행하고 그 결과를 클라이언트에게 전송
+ * filename: 실행할 CGI 프로그램의 경로
+ * cgiargs: CGI 프로그램에 전달할 인자 문자열
+ */
+void serve_dynamic(int fd, char *filename, char *cgiargs) {
+  char buf[MAXLINE];
+  char *emptylist[] = {NULL}; // CGI 실행을 위한 빈 인자 목록
+
+  /* 1. 성공을 가정하고, HTTP 응답의 첫 부분을 클라이언트에게 먼저 보냄 */
+  // CGI 프로그램이 성공적으로 실행될 것을 가정하고, 기본적인 성공 헤더를 먼저
+  // 전송. 상태 라인 (200 OK)
+  snprintf(buf, sizeof(buf), "HTTP/1.0 200 OK\r\n");
+  Rio_writen(fd, buf, strlen(buf));
+  // 서버 정보 헤더
+  snprintf(buf, sizeof(buf), "Server: Tiny Web Server\r\n");
+  Rio_writen(fd, buf, strlen(buf));
+
+  /* 2. 자식 프로세스를 생성하여 CGI 프로그램 실행 */
+  if (Fork() == 0) { /* 자식 프로세스(Child)의 코드 블록 */
+
+    // setenv: "QUERY_STRING"이라는 환경 변수를 cgiargs 값으로 설정.
+    // CGI 프로그램은 이 환경 변수를 읽어서 인자를 파싱함. (adder.c의 getenv
+    // 참고)
+    setenv("QUERY_STRING", cgiargs, 1);
+
+    // Dup2: 자식 프로세스의 표준 출력(STDOUT_FILENO, 즉 화면 출력)을
+    // 클라이언트 소켓(fd)으로 리다이렉션(redirection)함.
+    // 이제부터 자식 프로세스에서 printf로 출력하는 모든 것은 화면이 아닌
+    // 클라이언트에게 전송됨.
+    Dup2(fd, STDOUT_FILENO);
+
+    // Execve: 현재 실행 중인 자식 프로세스(tiny의 복사본)를
+    // filename에 지정된 새로운 CGI 프로그램으로 완전히 교체하여 실행.
+    // 성공하면 이 함수는 절대 리턴되지 않음.
+    Execve(filename, emptylist, environ);
+  }
+
+  // Fork()의 리턴 값이 0이 아닌 경우 -> 부모 프로세스(Parent)의 코드
+  // Wait: 부모 프로세스는 자식 프로세스가 종료될 때까지 여기서 기다림.
+  // 자식이 끝난 후 그 자원을 정리(reap)하여 좀비 프로세스가 되는 것을 방지.
+  Wait(NULL); /* Parent waits for and reaps child */
 }
