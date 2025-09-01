@@ -18,9 +18,9 @@ int main(void) {
   //  여기서는 책의 코드 구현(num1=100&num2=200)에 맞춰 설명)
   if ((buf = getenv("QUERY_STRING")) != NULL) {
     // buf: "num1=100&num2=200"
-    p = strchr(buf, '&'); // '&' 문자를 찾아서 p가 가리키게 합니다.
-    *p = '\0'; // 찾은 '&'를 NULL 문자('\0')로 바꿔서 문자열을 둘로 나눕니다.
-               // 이제 buf는 "num1=100" 이라는 문자열이 됩니다.
+    p = strchr(buf, '&'); // '&' 문자를 찾아서 p가 가리키게 함
+    *p = '\0'; // 찾은 '&'를 NULL 문자('\0')로 바꿔서 문자열을 둘로 나눔
+               // 이제 buf는 "num1=100" 이라는 문자열이 됨
 
     strcpy(arg1, buf); // "num1=100"을 arg1에 복사
     strcpy(arg2,

@@ -1,13 +1,21 @@
 <html>
-<head><title>test</title></head>
-<body> 
-<img align="middle" src="godzilla.gif">
-<!-- <video width="300" height="200" controls preload="auto" muted autoplay loop>
-    <source src="burning_godzilla.mpg" type="video/mpeg">
-</video> -->
-<video width="300" height="200" controls preload="auto" muted autoplay loop>
-    <source src="burning_godzilla.mp4" type="video/mp4">
-</video>
-Dave O'Hallaron
+
+<head>
+    <title>home</title>
+</head>
+
+<body>
+    <img align="middle" src="godzilla.gif">
+    <video width="300" height="200" controls preload="auto" muted autoplay loop>
+        <source src="burning_godzilla.mp4" type="video/mp4">
+    </video>
+    <form action="/cgi-bin/adder" method="get" target="adder_result">
+        <input type="number" name="num1" required placeholder="첫 번째 숫자">
+        +
+        <input type="number" name="num2" required placeholder="두 번째 숫자">
+        <button type="submit">더하기</button>
+    </form>
+    <iframe name="adder_result" style="width:100%; min-height:180px; border:1px solid #ccc; margin-top:12px;"></iframe>
 </body>
+
 </html>
