@@ -32,6 +32,8 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
+  Signal(SIGPIPE, SIG_IGN); // 클라이언트가 먼저 끊어도 프로세스가 안 죽게
+
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);
