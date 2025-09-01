@@ -12,14 +12,13 @@
 #define FILETYPE_MAX 256
 
 void doit(int fd);
-void read_requesthdrs(rio_t *rp);
+void read_requesthdrs(rio_t *rp, char *range);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, size_t filesize);
+void serve_static(int fd, char *filename, size_t filesize, char *range);
 void get_filetype(const char *filename, char *filetype, size_t cap);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
-char filetype[FILETYPE_MAX];
 
 int main(int argc, char **argv) {
   int listenfd, connfd;
@@ -49,13 +48,16 @@ void doit(int fd) {
   struct stat sbuf; // 파일의 정보를 담기 위한 구조체 (크기, 권한 등)
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char filename[MAXLINE], cgiargs[MAXLINE];
+  char range[MAXLINE] = ""; // Range 헤더 값을 저장할 변수 추가 및 초기화
   rio_t rio;
 
   /* 요청 line과 헤더 읽기 */
   Rio_readinitb(&rio, fd);
   // rio 버퍼를 통해 요청 라인 한 줄 (e.g. "GET /cgi-bin/adder?1&2 HTTP/1.0")을
   // 읽어옴
-  Rio_readlineb(&rio, buf, MAXLINE);
+  if (Rio_readlineb(&rio, buf, MAXLINE) <= 0)
+    return;
+
   printf("Request headers:\n");
   printf("%s", buf);
   // 읽어온 요청 라인을 공백 기준으로 쪼개서 method(GET),
@@ -72,7 +74,7 @@ void doit(int fd) {
   }
   // 요청 라인 다음에 오는 나머지 요청 헤더들(User-Agent 등)을 읽고 무시함(빈
   // 줄이 나올 때까지 while 문으로 다 읽어냄)
-  read_requesthdrs(&rio);
+  read_requesthdrs(&rio, range);
 
   /* 2. URI를 파싱하여 파일 이름과 CGI 인자 추출 */
   // uri를 분석해서 정적(static) 콘텐츠인지 동적(dynamic) 콘텐츠인지 판단
@@ -102,7 +104,7 @@ void doit(int fd) {
                   "Tiny couldn't read the file");
       return;
     }
-    serve_static(fd, filename, sbuf.st_size);
+    serve_static(fd, filename, sbuf.st_size, range);
   } else { /* 동적 콘텐츠(Dynamic content) 제공 */
     // 파일이 일반 파일이 아니거나, 실행 권한(S_IXUSR)이 없는 경우 '403
     // Forbidden' 에러 처리
@@ -160,20 +162,20 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
 /*
  * read_requesthdrs - HTTP 요청의 나머지 헤더들을 읽고 무시하는 함수
  * rp: 읽어올 rio_t 버퍼 포인터
- * 이 함수는 요청 라인(첫 줄)은 이미 읽혔다고 가정하고,
- * 그 다음 헤더 라인부터 헤더의 끝을 알리는 빈 줄("\r\n")이 나올 때까지
- * 모든 라인을 읽어서 없애는 역할을 한다.
+ * 'Range' 헤더가 있으면 그 값을 range_buf에 저장한다.
  */
-void read_requesthdrs(rio_t *rp) {
+void read_requesthdrs(rio_t *rp, char *range_buf) {
   char buf[MAXLINE];
 
-  // 한 줄을 읽는 것과 동시에, 읽은 내용이 있는지(EOF가 아닌지) 검사
   while (Rio_readlineb(rp, buf, MAXLINE) > 0) {
-    // 읽은 내용이 빈 줄("\r\n")인지 검사
-    if (!strcmp(buf, "\r\n")) {
-      break;
+    if (!strcmp(buf, "\r\n"))
+      break;           // 헤더 끝
+    printf("%s", buf); // 로그 출력
+
+    if (strncasecmp(buf, "Range:", 6) == 0) {
+      // buf의 내용을 range_buf에 MAXLINE 크기 제한을 두고 안전하게 복사한다.
+      snprintf(range_buf, MAXLINE, "%s", buf);
     }
-    printf("%s", buf); // 빈 줄이 아니면 헤더 내용 출력
   }
   return;
 }
@@ -233,29 +235,82 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 }
 
 // serve_static - 정적 파일을 클라이언트에게 전송
-void serve_static(int fd, char *filename, size_t filesize) {
+void serve_static(int fd, char *filename, size_t filesize, char *range) {
   int srcfd;  // 요청된 파일을 가리킬 파일 디스크립터
   char *srcp; // 요청된 파일을 메모리에 매핑한 시작 주소를 가리킬 포인터
   char buf[MAXBUF];
+  char filetype[FILETYPE_MAX];
+  long start = 0,
+       end = (filesize > 0) ? (long)filesize - 1 : 0; // 기본값은 파일 전체
+  int partial = 0;
+
+  // Range 헤더가 있는지, 그리고 그 형식이 맞는지 확인
+  // ("Range: bytes=START-END")
+  if (range && range[0] != '\0') {
+    long s = 0, e = -1;
+    // "Range: bytes=START-END" 또는 "Range: bytes=START-" 를 파싱
+    int n = sscanf(range, "Range: bytes=%ld-%ld", &s, &e); // "START-"면 n==1
+    if (n >= 1 && s >= 0) {
+      start = s;
+      if (n == 1 || e < 0)
+        e = (long)filesize - 1; // 열린 범위 START-
+      end = e;
+      partial = 1;
+    }
+  }
+
+  // 유효성/경계 보정 및 416 처리
+  if (partial) {
+    if (start >= (long)filesize) {
+      int m = snprintf(buf, sizeof(buf),
+                       "HTTP/1.0 416 Range Not Satisfiable\r\n"
+                       "Server: Tiny Web Server\r\n"
+                       "Connection: close\r\n"
+                       "Content-Range: bytes */%zu\r\n"
+                       "Content-Length: 0\r\n\r\n",
+                       filesize);
+      Rio_writen(fd, buf, (size_t)m);
+      return;
+    }
+    if (end < 0 || end >= (long)filesize)
+      end = (long)filesize - 1;
+    if (end < start)
+      end = (long)filesize - 1; // "START-" 케이스
+  }
+
+  long length = (end - start + 1); // 전송할 바이트 수
+  size_t tosend = (size_t)length;  // 헤더/복사 루틴에서 쓸 타입
 
   /* 1. HTTP 응답 헤더(Response headers)를 클라이언트에게 전송 */
 
   // 파일 이름의 접미사를 보고 파일 타입을 결정 (예: .html -> text/html)
   get_filetype(filename, filetype, sizeof(filetype));
 
-  // filetype은 위에서 cap만큼만 채워졌지만, 포맷 단계에서도 상한을 한 번 더!
+  // filetype은 위에서 cap만큼만 채워졌지만, 포맷 단계에서도 상한을 한 번 더
   int ft_prec = (int)strnlen(filetype, sizeof(filetype) - 1);
 
-  // 응답 헤더 문자열 생성 (snprintf 사용으로 buf 오버플로우 방지)
-  snprintf(buf, sizeof(buf),
-           "HTTP/1.0 200 OK\r\n"
-           "Server: Tiny Web Server\r\n"
-           "Connection: close\r\n"
-           "Content-length: %zu\r\n"
-           "Content-type: %.*s\r\n\r\n" // 헤더의 끝을 알리는 중요한 빈 줄
-           ,
-           filesize, ft_prec, filetype);
-  Rio_writen(fd, buf, strlen(buf)); // 생성된 응답 헤더를 클라이언트에게 전송
+  if (partial) {
+    int n = snprintf(buf, sizeof(buf),
+                     "HTTP/1.0 206 Partial Content\r\n"
+                     "Server: Tiny Web Server\r\n"
+                     "Connection: close\r\n"
+                     "Accept-Ranges: bytes\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Content-Range: bytes %ld-%ld/%zu\r\n"
+                     "Content-Type: %.*s\r\n\r\n",
+                     tosend, start, end, filesize, ft_prec, filetype);
+    Rio_writen(fd, buf, (size_t)n);
+  } else {
+    int n = snprintf(buf, sizeof(buf),
+                     "HTTP/1.0 200 OK\r\n"
+                     "Server: Tiny Web Server\r\n"
+                     "Connection: close\r\n"
+                     "Accept-Ranges: bytes\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Content-Type: %.*s\r\n\r\n",
+                     filesize, ft_prec, filetype);
+    Rio_writen(fd, buf, (size_t)n);
+  }
   printf("Response headers:\n%s", buf);
 
   /* 2. HTTP 응답 본문(Response body)을 클라이언트에게 전송 */
@@ -310,6 +365,10 @@ void get_filetype(const char *filename, char *filetype, size_t cap) {
     snprintf(filetype, cap, "image/jpeg");
   else if (!strcasecmp(ext, "png"))
     snprintf(filetype, cap, "image/png");
+  else if (!strcasecmp(ext, "mpg") || !strcasecmp(ext, "mpeg"))
+    snprintf(filetype, cap, "video/mpeg");
+  else if (!strcasecmp(ext, "mp4"))
+    snprintf(filetype, cap, "video/mp4");
   else // 위 목록에 없는 모든 다른 확장자들의 경우
        // 일반적인 바이너리 파일 타입을 의미하는 "application/octet-stream"으로
        // 설정
