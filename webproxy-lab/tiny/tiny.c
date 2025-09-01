@@ -15,9 +15,10 @@ void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *range);
 int parse_uri(char *uri, char *filename, char *cgiargs);
 /* 정적 파일 전송: 단일 Range 요청(206/416)과 전체 전송(200)을 모두 처리 */
-void serve_static(int fd, char *filename, size_t filesize, char *range);
+void serve_static(int fd, char *filename, size_t filesize, char *range,
+                  int is_head);
 void get_filetype(const char *filename, char *filetype, size_t cap);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
+void serve_dynamic(int fd, char *filename, char *cgiargs, int is_head);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 
@@ -66,14 +67,14 @@ void doit(int fd) {
   // 요청 라인 파싱하여 각각 변수에 담음: method / uri / version
   sscanf(buf, "%s %s %s", method, uri, version);
 
-  // Tiny는 GET만 지원(그 외 메서드는 501)
-  if (strcasecmp(
-          method,
-          "GET")) { // strcasecmp는 대소문자 구분 없이 비교. 같으면 0을 반환
+  // Tiny는 GET와 HEAD만 지원(그 외 메서드는 501)
+  // strcasecmp는 대소문자 구분 없이 비교. 같으면 0을 반환
+  if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")) {
     clienterror(fd, method, "501", "NOT implemented",
                 "Tiny does not implement this method");
     return;
   }
+  int is_head = (strcasecmp(method, "HEAD") == 0); // HEAD 요청이면 1, 아니면 0
 
   // 나머지 요청 헤더를 읽는다.
   // 여기서 Range 헤더가 있으면 range 버퍼에 저장(그 외는 무시).
@@ -102,7 +103,7 @@ void doit(int fd) {
       return;
     }
     // 정적 파일 전송: Range(단일 범위)와 전체 전송 모두 지원
-    serve_static(fd, filename, sbuf.st_size, range);
+    serve_static(fd, filename, sbuf.st_size, range, is_head);
   } else { /* 동적 콘텐츠(Dynamic content) 제공 */
     // 파일이 일반 파일이 아니거나, 실행 권한(S_IXUSR)이 없는 경우 '403 에러'
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
@@ -110,7 +111,7 @@ void doit(int fd) {
                   "Tiny couldn’t run the CGI program");
       return;
     }
-    serve_dynamic(fd, filename, cgiargs);
+    serve_dynamic(fd, filename, cgiargs, is_head);
   }
 }
 
@@ -226,7 +227,8 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 }
 
 // serve_static - 정적 파일을 클라이언트에게 전송
-void serve_static(int fd, char *filename, size_t filesize, char *range) {
+void serve_static(int fd, char *filename, size_t filesize, char *range,
+                  int is_head) {
   int srcfd; // 요청된 파일을 가리킬 파일 디스크립터
   char buf[MAXBUF];
   char filetype[FILETYPE_MAX];
@@ -303,6 +305,10 @@ void serve_static(int fd, char *filename, size_t filesize, char *range) {
   }
   printf("Response headers:\n%s", buf);
 
+  if (is_head) {
+    return;
+  }
+
   /* 2. HTTP 응답 본문(Response body)을 클라이언트에게 전송 */
   srcfd = Open(filename, O_RDONLY, 0); // 요청된 파일을 읽기 전용으로 열기
 
@@ -318,7 +324,7 @@ void serve_static(int fd, char *filename, size_t filesize, char *range) {
   // off_t 캐스팅은 플랫폼별 타입 일치용.
   Lseek(srcfd, (off_t)start, SEEK_SET);
 
-  // left: 아직 보내야 할 바이트 수(이미 tosend = end - start + 1로 계산해 둠).
+  // left: 아직 보내야 할 바이트 수(이미 tosend = end - start + 1로 계산해둠).
   size_t left = tosend;
 
   // 아래의 루프 덕에 큰 파일도 적은 메모리로 안정적으로 스트리밍 가능.
@@ -398,7 +404,7 @@ void get_filetype(const char *filename, char *filetype, size_t cap) {
  * filename: 실행할 CGI 프로그램의 경로
  * cgiargs: CGI 프로그램에 전달할 인자 문자열
  */
-void serve_dynamic(int fd, char *filename, char *cgiargs) {
+void serve_dynamic(int fd, char *filename, char *cgiargs, int is_head) {
   char buf[MAXLINE];
   char *emptylist[] = {NULL}; // CGI 실행을 위한 빈 인자 목록
 
@@ -410,6 +416,11 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
   // 서버 정보 헤더
   snprintf(buf, sizeof(buf), "Server: Tiny Web Server\r\n");
   Rio_writen(fd, buf, strlen(buf));
+
+  // 만약 HEAD 요청이면, 기본 헤더만 보내고 자식 프로세스를 생성하지 않고 종료.
+  if (is_head) {
+    return;
+  }
 
   /* 2. 자식 프로세스를 생성하여 CGI 프로그램 실행 */
   if (Fork() == 0) { /* 자식 프로세스(Child)의 코드 블록 */
